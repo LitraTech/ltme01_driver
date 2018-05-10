@@ -1,6 +1,8 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+#define LTME01_SDK_VERSION "1.0.0"
+
 #ifdef _WIN32
 #ifdef LTME01_SDK_EXPORTS
 #define LTME01_SDK_API __declspec(dllexport)
