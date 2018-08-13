@@ -19,7 +19,9 @@ ExternalProject_Add(libusb-1.0.21
     "--prefix=${CMAKE_CURRENT_BINARY_DIR}/ThirdParty/libusb-1.0.21"
     "--enable-shared=no"
     "--enable-static=yes"
-  BUILD_COMMAND make
+  BUILD_COMMAND "bash"
+    "-c"
+    "(make check &> /dev/null || touch ${LIBUSB_DIR}/aclocal.m4 ${LIBUSB_DIR}/Makefile.in ${LIBUSB_DIR}/configure ${LIBUSB_DIR}/config.h.in) && make"
   INSTALL_COMMAND make install
 )
 

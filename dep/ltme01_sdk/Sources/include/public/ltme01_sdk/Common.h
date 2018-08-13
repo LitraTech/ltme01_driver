@@ -1,7 +1,7 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#define LTME01_SDK_VERSION "1.0.0"
+#define LTME01_SDK_VERSION "1.0.1"
 
 #ifdef _WIN32
 #ifdef LTME01_SDK_EXPORTS
