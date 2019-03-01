@@ -17,6 +17,7 @@ set(SDK_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Sources/src")
 FILE(GLOB_RECURSE SDK_SRC "${SDK_SRC_DIR}/*.cpp")
 
 project(ltme01_sdk)
+add_definitions(-DASIO_STANDALONE)
 add_library(${PROJECT_NAME} ${SDK_SRC})
 set_target_properties(${PROJECT_NAME} PROPERTIES PREFIX "")
 set_target_properties(${PROJECT_NAME} PROPERTIES IMPORT_PREFIX "")
@@ -28,5 +29,7 @@ endif()
 target_include_directories(${PROJECT_NAME}
   PUBLIC "${SDK_INCLUDE_DIR}/public"
   PRIVATE "${SDK_INCLUDE_DIR}/private"
-  PRIVATE "${LIBUSB_DIR}/include")
+  PRIVATE "${LIBUSB_DIR}/include"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/Asio/asio-1.12.1/include"
+)
 target_link_libraries(${PROJECT_NAME} ${LIBUSB_LIBRARY})

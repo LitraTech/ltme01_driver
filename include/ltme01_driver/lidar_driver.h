@@ -4,14 +4,11 @@
 #include <ros/ros.h>
 #include <sensor_msgs/LaserScan.h>
 
-#include "ltme01_driver/device_notifier.h"
-
-#include <condition_variable>
+#include "ltme01_sdk/DeviceInfo.h"
 
 class LidarDriver
 {
 public:
-  const static std::string DEFAULT_DEVICE;
   const static std::string DEFAULT_FRAME_ID;
   const static double ANGLE_MIN_LIMIT;
   const static double ANGLE_MAX_LIMIT;
@@ -23,6 +20,9 @@ public:
 public:
   LidarDriver();
   void run();
+
+private:
+  std::unique_ptr<ltme01_sdk::DeviceInfo> waitForDevice(const std::string& devicePathOrAddress);
 
 private:
   ros::NodeHandle nh_, nhPrivate_;
@@ -37,11 +37,6 @@ private:
   double angleExcludedMax_;
   double rangeMin_;
   double rangeMax_;
-
-  DeviceNotifier deviceNotifier_;
-
-  std::mutex mutex_;
-  std::condition_variable cv_;
 };
 
 #endif

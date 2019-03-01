@@ -23,6 +23,11 @@ public:
   UsbLocation& operator=(const UsbLocation& other);
   bool operator==(const UsbLocation& other) const;
 
+  virtual std::unique_ptr<Location> clone() const;
+  virtual bool equals(const Location& other) const;
+
+  virtual std::string label() const;
+
   uint8_t busNumber() const;
   uint8_t deviceAddress() const;
 

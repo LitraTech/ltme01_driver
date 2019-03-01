@@ -3,6 +3,7 @@
 
 #include "ltme01_sdk/Common.h"
 
+#include "ltme01_sdk/DeviceInfo.h"
 #include "ltme01_sdk/Location.h"
 #include "ltme01_sdk/DataPacket.h"
 
@@ -27,6 +28,7 @@ class Transport;
 class LTME01_SDK_API Device
 {
 public:
+  Device(const DeviceInfo& deviceInfo);
   Device(const Location& location);
   virtual ~Device();
 

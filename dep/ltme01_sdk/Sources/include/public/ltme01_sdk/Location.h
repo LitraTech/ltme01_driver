@@ -3,16 +3,27 @@
 
 #include "ltme01_sdk/Common.h"
 
+#include <memory>
+#include <string>
+
 namespace ltme01_sdk
 {
 
 class LTME01_SDK_API Location
 {
 public:
-  virtual ~Location() = 0;
+  virtual ~Location() = default;
+
+  virtual std::unique_ptr<Location> clone() const = 0;
+  virtual bool equals(const Location& other) const = 0;
+
+  virtual std::string label() const = 0;
 };
 
-inline Location::~Location() = default;
+inline bool operator==(const Location& a, const Location& b)
+{
+  return a.equals(b);
+}
 
 }
 

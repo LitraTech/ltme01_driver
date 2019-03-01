@@ -52,6 +52,9 @@ inline RequestPacket::~RequestPacket() = default;
 class LTME01_SDK_API GenericRequestPacket : public RequestPacket
 {
 public:
+  static const uint16_t REQUEST_DEVICE_DISCOVERY = 0x0000;
+
+public:
   GenericRequestPacket(uint16_t request);
 
   void setReference(uint16_t reference);

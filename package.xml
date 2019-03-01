@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <package format="2">
   <name>ltme01_driver</name>
-  <version>1.0.1</version>
-  <description>ROS driver for LTME-01</description>
+  <version>2.0.0</version>
+  <description>ROS driver for LitraTech's LTME-01x series 2D laser scanners</description>
 
   <!-- One maintainer tag required, multiple allowed, one person per tag -->
   <!-- Example:  -->

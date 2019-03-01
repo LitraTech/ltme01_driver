@@ -29,8 +29,11 @@ bool ltme01_sdk::DataPacket::isValid() const
     return false;
 
   uint16_t checksum = 0;
-  checksum += header_->signature + ((header_->count << 8) | header_->index) + header_->reserved1
-    + (header_->reserved2 & 0xFFFF) + (header_->reserved2 >> 16);
+  checksum += header_->signature +
+      ((header_->count << 8) | header_->index) +
+      ((header_->flags << 8) | header_->reserved) +
+      (header_->timestamp & 0xFFFF) +
+      (header_->timestamp >> 16);
   for (int i = 0; i < header_->count; i++)
     checksum += ((uint16_t*)(data_ + sizeof(DataPacketHeader)))[i];
 
@@ -48,6 +51,16 @@ uint8_t ltme01_sdk::DataPacket::index() const
 uint8_t ltme01_sdk::DataPacket::count() const
 {
   return header_->count;
+}
+
+uint8_t ltme01_sdk::DataPacket::flags() const
+{
+  return header_->flags;
+}
+
+uint32_t ltme01_sdk::DataPacket::timestamp() const
+{
+  return header_->timestamp;
 }
 
 uint16_t ltme01_sdk::DataPacket::range(int i) const

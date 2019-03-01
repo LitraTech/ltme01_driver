@@ -6,6 +6,11 @@
 #include <ctime>
 #include <cstring>
 
+ltme01_sdk::Device::Device(const ltme01_sdk::DeviceInfo& deviceInfo)
+  : Device(deviceInfo.location())
+{
+}
+
 ltme01_sdk::Device::Device(const Location& location)
   : transport_(Transport::createInstance(location))
 {

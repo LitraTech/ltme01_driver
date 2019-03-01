@@ -1,12 +1,14 @@
 #include "ltme01_driver/lidar_driver.h"
 
 #include <libudev.h>
-#include <sys/stat.h>
 
-#include "ltme01_sdk/Device.h"
+#include <boost/filesystem.hpp>
+#include <boost/asio.hpp>
+
 #include "ltme01_sdk/usb/UsbLocation.h"
+#include "ltme01_sdk/lan/LanLocation.h"
+#include "ltme01_sdk/Device.h"
 
-const std::string LidarDriver::DEFAULT_DEVICE = "/dev/ltme01";
 const std::string LidarDriver::DEFAULT_FRAME_ID = "ltme01";
 const double LidarDriver::ANGLE_MIN_LIMIT = -2.356;
 const double LidarDriver::ANGLE_MAX_LIMIT = 2.356;
@@ -18,7 +20,10 @@ const double LidarDriver::RANGE_MAX_LIMIT = 30;
 LidarDriver::LidarDriver()
   : nhPrivate_("~")
 {
-  nhPrivate_.param<std::string>("device", device_, DEFAULT_DEVICE);
+  if (!nhPrivate_.getParam("device", device_)) {
+    ROS_ERROR("Missing required parameter \"device\"");
+    exit(-1);
+  }
   nhPrivate_.param<std::string>("frame_id", frameId_, DEFAULT_FRAME_ID);
   nhPrivate_.param<double>("angle_min", angleMin_, ANGLE_MIN_LIMIT);
   nhPrivate_.param<double>("angle_max", angleMax_, ANGLE_MAX_LIMIT);
@@ -57,50 +62,22 @@ LidarDriver::LidarDriver()
 
 void LidarDriver::run()
 {
-  deviceNotifier_.registerDeviceEventCallback([this](DeviceEvent event) {
-    if (event == EVENT_DEVICE_NODE_CREATED) {
-      std::unique_lock<std::mutex> lock(mutex_);
-      cv_.notify_one();
-      lock.unlock();
-    }
-  });
-  deviceNotifier_.start(device_);
-
   while (nh_.ok()) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    bool status = cv_.wait_for(lock, std::chrono::milliseconds(500), [this]() {
-      return (access(device_.c_str(), F_OK) == 0);
-    });
-    if (!status)
-      continue;
+    std::unique_ptr<ltme01_sdk::DeviceInfo> deviceInfo = waitForDevice(device_);
+    if (!deviceInfo)
+      break;
 
-    struct stat sb;
-    if (stat(device_.c_str(), &sb) == -1) {
-      ROS_WARN_THROTTLE(5, "Can't access device %s", device_.c_str());
-      continue;
+    if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB) {
+      const ltme01_sdk::UsbLocation& location = (const ltme01_sdk::UsbLocation&)deviceInfo->location();
+      ROS_INFO("Found LTME-01B at USB bus %03d, address %03d", location.busNumber(), location.deviceAddress());
+    }
+    else if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_LAN) {
+      const ltme01_sdk::LanLocation& location = (const ltme01_sdk::LanLocation&)deviceInfo->location();
+      ROS_INFO("Found LTME-01C at local network address %s",
+               boost::asio::ip::address_v4(ntohl(location.deviceAddress())).to_string().c_str());
     }
 
-    int busNum = 0, deviceNum = 0;
-
-    struct udev* udev = udev_new();
-    if (udev != NULL) {
-      struct udev_device* device = udev_device_new_from_devnum(udev, 'c', sb.st_rdev);
-      if (device != NULL) {
-        busNum = std::atoi(udev_device_get_sysattr_value(device, "busnum"));
-        deviceNum = std::atoi(udev_device_get_sysattr_value(device, "devnum"));
-        udev_device_unref(device);
-      }
-      udev_unref(udev);
-    }
-
-    if (busNum == 0 || deviceNum == 0) {
-      ROS_WARN_THROTTLE(5, "Can't query attributes for device %s", device_.c_str());
-      continue;
-    }
-
-    ROS_INFO("Found LTME-01 device at bus %03d, address %03d", busNum, deviceNum);
-
-    ltme01_sdk::Device device(ltme01_sdk::UsbLocation(busNum, deviceNum));
+    ltme01_sdk::Device device(*deviceInfo);
 
     int result = device.open();
     if (result != ltme01_sdk::RESULT_SUCCESS) {
@@ -140,7 +117,10 @@ void LidarDriver::run()
         laserScan_.angle_min = angleMin_;
         laserScan_.angle_max = angleMax_;
         laserScan_.time_increment = 0.1 / beamCount;
-        laserScan_.scan_time = 0.1;
+        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB)
+          laserScan_.scan_time = 0.1;
+        else
+          laserScan_.scan_time = 1.0 / 15;
         laserScan_.range_min = rangeMin_;
         laserScan_.range_max = rangeMax_;
         laserScan_.ranges.resize(beamIndexMax - beamIndexMin + 1);
@@ -154,10 +134,18 @@ void LidarDriver::run()
               continue;
 
             uint16_t range = dataPacket.range(i);
-            if (range == ltme01_sdk::DataPacket::RANGE_TIMEOUT || range == ltme01_sdk::DataPacket::RANGE_NO_DATA)
+            if (range == ltme01_sdk::DataPacket::RANGE_TIMEOUT)
+              laserScan_.ranges[beamIndex - beamIndexMin] = std::numeric_limits<float>::infinity();
+            else if (range == ltme01_sdk::DataPacket::RANGE_NO_DATA)
               laserScan_.ranges[beamIndex - beamIndexMin] = 0;
-            else
-              laserScan_.ranges[beamIndex - beamIndexMin] = range / 100.0;
+            else {
+              float value = range / 100.0;
+              if (value < laserScan_.range_min)
+                value = 0;
+              else if (value > laserScan_.range_max)
+                value = std::numeric_limits<float>::infinity();
+              laserScan_.ranges[beamIndex - beamIndexMin] = value;
+            }
           }
         };
 
@@ -187,8 +175,135 @@ void LidarDriver::run()
       ROS_INFO("Device closed");
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ros::Duration(0.5).sleep();
   }
+}
+
+std::unique_ptr<ltme01_sdk::DeviceInfo> LidarDriver::waitForDevice(const std::string& devicePathOrAddress)
+{
+  std::unique_ptr<ltme01_sdk::DeviceInfo> deviceInfo;
+
+  boost::filesystem::path path(devicePathOrAddress);
+  if (path.has_root_path()) {
+    struct udev* udev = udev_new();
+    if (!udev) {
+      ROS_ERROR("Can't initialize udev");
+      exit(-1);
+    }
+    struct udev_enumerate* udevEnumerate = udev_enumerate_new(udev);
+    udev_enumerate_add_match_sysattr(udevEnumerate, "idVendor", "16d0");
+    udev_enumerate_add_match_sysattr(udevEnumerate, "idProduct", "0db7");
+
+    while (nh_.ok()) {
+      if (boost::filesystem::exists(path)) {
+        boost::filesystem::path canonicalPath = boost::filesystem::canonical(path);
+
+        udev_enumerate_scan_devices(udevEnumerate);
+        struct udev_list_entry* deviceList = udev_enumerate_get_list_entry(udevEnumerate);
+        struct udev_list_entry* deviceListEntry = NULL;
+        udev_list_entry_foreach(deviceListEntry, deviceList) {
+          const char* syspath = udev_list_entry_get_name(deviceListEntry);
+          struct udev_device* device = udev_device_new_from_syspath(udev, syspath);
+          if (canonicalPath.string() == udev_device_get_devnode(device)) {
+            int busNumber = std::atoi(udev_device_get_sysattr_value(device, "busnum"));
+            int deviceAddress = std::atoi(udev_device_get_sysattr_value(device, "devnum"));
+            deviceInfo = std::unique_ptr<ltme01_sdk::DeviceInfo>(
+                  new ltme01_sdk::DeviceInfo(ltme01_sdk::UsbLocation(busNumber, deviceAddress)));
+          }
+          udev_device_unref(device);
+        }
+      }
+
+      if (deviceInfo)
+        break;
+      else {
+        ROS_INFO_THROTTLE(5, "Waiting for device... [%s]", devicePathOrAddress.c_str());
+        ros::Duration(1).sleep();
+      }
+    }
+
+    udev_enumerate_unref(udevEnumerate);
+    udev_unref(udev);
+  }
+  else {
+    std::string addressStr = devicePathOrAddress;
+    std::string portStr = "8100";
+
+    size_t position = devicePathOrAddress.find(':');
+    if (position != std::string::npos) {
+      addressStr = devicePathOrAddress.substr(0, position);
+      portStr = devicePathOrAddress.substr(position + 1);
+    }
+
+    in_addr_t address = INADDR_NONE;
+    in_port_t port = 0;
+    try {
+      address = htonl(boost::asio::ip::address_v4::from_string(addressStr).to_ulong());
+      port = htons(std::stoi(portStr));
+    }
+    catch (...) {
+      ROS_ERROR("Invalid device address: %s", devicePathOrAddress.c_str());
+      exit(-1);
+    }
+
+    boost::asio::io_service ioService;
+    boost::asio::ip::udp::socket socket(ioService, boost::asio::ip::udp::v4());
+    boost::asio::deadline_timer timer(ioService);
+
+    boost::asio::ip::udp::endpoint localEndpoint(boost::asio::ip::udp::v4(), ntohs(port));
+    boost::system::error_code error;
+    socket.bind(localEndpoint, error);
+    if (error) {
+      ROS_ERROR("Can't bind to port %d. Please make sure you have sufficient permissions, "
+                "and only one driver node instance is running.", ntohs(port));
+      exit(-1);
+    }
+
+    ltme01_sdk::DataPacket dataPacket;
+    while (nh_.ok()) {
+      boost::system::error_code timerResult, transactionResult;
+      timerResult = transactionResult = boost::asio::error::would_block;
+
+      timer.expires_from_now(boost::posix_time::milliseconds(500));
+      timer.async_wait([&](const boost::system::error_code& error) {
+        timerResult = error;
+      });
+
+      auto buffer = boost::asio::buffer(dataPacket.data(), ltme01_sdk::DataPacket::MAX_DATA_PACKET_SIZE);
+      boost::asio::ip::udp::endpoint peerEndpoint;
+      std::function<void(const boost::system::error_code&, std::size_t)> handler;
+      handler = [&](const boost::system::error_code& error, std::size_t) {
+        if (!error) {
+          if (peerEndpoint.address().to_v4().to_ulong() != ntohl(address))
+            socket.async_receive_from(buffer, peerEndpoint, handler);
+          else
+            deviceInfo = std::unique_ptr<ltme01_sdk::DeviceInfo>(
+                  new ltme01_sdk::DeviceInfo(ltme01_sdk::LanLocation(address, port)));
+        }
+        else
+          transactionResult = error;
+      };
+      socket.async_receive_from(buffer, peerEndpoint, handler);
+
+      ioService.reset();
+      while (ioService.run_one()) {
+        if (transactionResult != boost::asio::error::would_block)
+          timer.cancel();
+        if (timerResult != boost::asio::error::would_block)
+          socket.cancel();
+      }
+
+      if (deviceInfo)
+        break;
+      else {
+        ROS_INFO_THROTTLE(5, "Waiting for device... [%s]", (boost::asio::ip::address_v4(ntohl(address)).to_string() +
+                                                            ":" + std::to_string(ntohs(port))).c_str());
+        ros::Duration(0.5).sleep();
+      }
+    }
+  }
+
+  return deviceInfo;
 }
 
 int main(int argc, char* argv[])

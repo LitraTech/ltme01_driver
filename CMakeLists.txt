@@ -31,7 +31,6 @@ include_directories(
 )
 
 add_executable(${PROJECT_NAME}_node
-  src/device_notifier.cpp
   src/lidar_driver.cpp
 )
 

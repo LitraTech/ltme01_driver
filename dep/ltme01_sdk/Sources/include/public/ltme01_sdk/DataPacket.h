@@ -10,7 +10,7 @@ namespace ltme01_sdk {
 class LTME01_SDK_API DataPacket
 {
 public:
-  static const int MAX_DATA_PACKET_SIZE = 140;
+  static const int MAX_DATA_PACKET_SIZE = 256;
 
   static const uint16_t DATA_PACKET_SIGNATURE = 0xFFFF;
 
@@ -31,6 +31,8 @@ public:
 
   uint8_t index() const;
   uint8_t count() const;
+  uint8_t flags() const;
+  uint32_t timestamp() const;
   uint16_t range(int i) const;
 
   uint8_t* data();
@@ -42,8 +44,9 @@ private:
     uint16_t signature;
     uint8_t index;
     uint8_t count;
-    uint16_t reserved1;
-    uint32_t reserved2;
+    uint8_t reserved;
+    uint8_t flags;
+    uint32_t timestamp;
     uint16_t checksum;
   } DataPacketHeader;
 #pragma pack(pop)
