@@ -113,14 +113,17 @@ void LidarDriver::run()
         int beamIndexExcludedMax = std::floor(angleExcludedMax_ * beamCount / (2 * M_PI));
 
         laserScan_.header.frame_id = frameId_;
-        laserScan_.angle_increment = 2 * M_PI / beamCount;
         laserScan_.angle_min = angleMin_;
         laserScan_.angle_max = angleMax_;
-        laserScan_.time_increment = 0.1 / beamCount;
-        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB)
-          laserScan_.scan_time = 0.1;
-        else
+        laserScan_.angle_increment = 2 * M_PI / beamCount;
+        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB) {
+          laserScan_.time_increment = 1.0 / 10 / beamCount;
+          laserScan_.scan_time = 1.0 / 10;
+        }
+        else {
+          laserScan_.time_increment = 1.0 / 15 / beamCount;
           laserScan_.scan_time = 1.0 / 15;
+        }
         laserScan_.range_min = rangeMin_;
         laserScan_.range_max = rangeMax_;
         laserScan_.ranges.resize(beamIndexMax - beamIndexMin + 1);
@@ -156,13 +159,14 @@ void LidarDriver::run()
             readRangeData(dataPacket);
           } while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN);
 
+          laserScan_.header.stamp = ros::Time::now();
+
           while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX) {
             addRangeData(dataPacket);
             readRangeData(dataPacket);
           }
           addRangeData(dataPacket);
 
-          laserScan_.header.stamp = ros::Time::now();
           laserScanPublisher_.publish(laserScan_);
         }
       }
