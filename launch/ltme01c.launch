@@ -26,5 +26,10 @@
     <param name="range_min" value="0.2"/>
     <param name="range_max" value="30"/>
     -->
+
+    <!-- Experimental: calibrate packet latency and compensate timestamp in published LaserScan messages. Defaults to false. -->
+    <!--
+    <param name="calibrate_time" value="false"/>
+    -->
   </node>
 </launch>

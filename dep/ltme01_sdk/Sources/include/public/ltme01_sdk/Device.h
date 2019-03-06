@@ -40,6 +40,9 @@ public:
   int readDataPacket(DataPacket& dataPacket);
   int readDataPacket(DataPacket& dataPacket, unsigned int timeout);
 
+  bool getTimestamp(uint32_t& timestamp);
+  bool resetTimestamp();
+
 protected:
   std::unique_ptr<Transport> transport_;
   std::atomic<uint16_t> reference_;

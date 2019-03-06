@@ -9,6 +9,13 @@
 class LidarDriver
 {
 public:
+  LidarDriver();
+  void run();
+
+private:
+  std::unique_ptr<ltme01_sdk::DeviceInfo> waitForDevice(const std::string& devicePathOrAddress);
+
+private:
   const static std::string DEFAULT_FRAME_ID;
   const static double ANGLE_MIN_LIMIT;
   const static double ANGLE_MAX_LIMIT;
@@ -17,12 +24,8 @@ public:
   const static double RANGE_MIN_LIMIT;
   const static double RANGE_MAX_LIMIT;
 
-public:
-  LidarDriver();
-  void run();
-
-private:
-  std::unique_ptr<ltme01_sdk::DeviceInfo> waitForDevice(const std::string& devicePathOrAddress);
+  const static int CALIBRATION_STAGE_1_ITERATIONS = 256;
+  const static int CALIBRATION_STAGE_2_ITERATIONS = 256;
 
 private:
   ros::NodeHandle nh_, nhPrivate_;
@@ -37,6 +40,7 @@ private:
   double angleExcludedMax_;
   double rangeMin_;
   double rangeMax_;
+  bool calibrateTime_;
 };
 
 #endif

@@ -31,6 +31,7 @@ LidarDriver::LidarDriver()
   nhPrivate_.param<double>("angle_excluded_max", angleExcludedMax_, DEFAULT_ANGLE_EXCLUDED_MAX);
   nhPrivate_.param<double>("range_min", rangeMin_, RANGE_MIN_LIMIT);
   nhPrivate_.param<double>("range_max", rangeMax_, RANGE_MAX_LIMIT);
+  nhPrivate_.param<bool>("calibrate_time", calibrateTime_, false);
 
   if (!(angleMin_ < angleMax_)) {
     ROS_ERROR("angle_min (%f) can't be larger than or equal to angle_max (%f)", angleMin_, angleMax_);
@@ -91,7 +92,73 @@ void LidarDriver::run()
     else {
       ROS_INFO("Device opened");
 
-      auto readRangeData = [&device](ltme01_sdk::DataPacket& dataPacket) {
+      ltme01_sdk::DataPacket dataPacket;
+
+      ros::Duration packetLatency;
+      if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_LAN && calibrateTime_) {
+        ROS_INFO("Starting time calibration...This may take a few seconds");
+
+        if (!device.resetTimestamp())
+          ROS_ERROR("Can't prepare device for calibration. "
+                    "Please make sure that your device supports this feature");
+        else {
+          std::vector<ros::Duration> deviceToHostOffsets(CALIBRATION_STAGE_1_ITERATIONS);
+          for (int i = 0; i < CALIBRATION_STAGE_1_ITERATIONS; i++) {
+            ros::Time timeOfRequest = ros::Time::now();
+            uint32_t deviceTimestamp = 0;
+            if (!device.getTimestamp(deviceTimestamp)) {
+              ROS_ERROR("Failed to query for device timestamp");
+              continue;
+            }
+            ros::Time timeOfResponse = ros::Time::now();
+
+            deviceToHostOffsets[i] = ros::Time((timeOfResponse.toSec() + timeOfRequest.toSec()) / 2) -
+                ros::Time((double)deviceTimestamp / 1e6);
+          }
+
+          std::nth_element(deviceToHostOffsets.begin(),
+                           deviceToHostOffsets.begin() + deviceToHostOffsets.size() / 2,
+                           deviceToHostOffsets.end());
+          ros::Duration deviceToHostOffset = deviceToHostOffsets[deviceToHostOffsets.size() / 2];
+
+          ROS_INFO("Clearing cached packets from underlying protocol stack...");
+          while (true) {
+            int result = device.readDataPacket(dataPacket, 1);
+            if (result != ltme01_sdk::RESULT_SUCCESS) {
+              if (result == ltme01_sdk::RESULT_TIMEOUT)
+                ROS_INFO("Cache cleared");
+              else
+                ROS_INFO("Error reading packet. Is device functioning properly?");
+              break;
+            }
+          }
+
+          std::vector<ros::Duration> packetLatencies(CALIBRATION_STAGE_2_ITERATIONS);
+          for (int i = 0; i < CALIBRATION_STAGE_2_ITERATIONS; i++) {
+            int result = device.readDataPacket(dataPacket, 100);
+            if (result != ltme01_sdk::RESULT_SUCCESS) {
+              ROS_ERROR("Can't read data packet for calibration");
+              continue;
+            }
+            ros::Time timeOfReception = ros::Time::now();
+            ros::Time timeOfPacketStart = ros::Time().fromSec((double)dataPacket.timestamp() / 1e6 +
+                                                              deviceToHostOffset.toSec());
+
+            packetLatencies[i] = timeOfReception - timeOfPacketStart;
+          }
+
+          std::nth_element(packetLatencies.begin(),
+                           packetLatencies.begin() + packetLatencies.size() / 2,
+                           packetLatencies.end());
+          packetLatency = packetLatencies[packetLatencies.size() / 2];
+
+          ROS_INFO("Calibration finished. Latency is %.3f milliseconds", packetLatency.toSec() * 1e3);
+        }
+      }
+
+      ROS_INFO("Publishing LaserScan messages...");
+
+      auto readDataPacket = [&device](ltme01_sdk::DataPacket& dataPacket) {
         int count = 0;
         do {
           int result = device.readDataPacket(dataPacket, 6000);
@@ -102,9 +169,8 @@ void LidarDriver::run()
           throw std::exception();
       };
 
-      ltme01_sdk::DataPacket dataPacket;
       try {
-        readRangeData(dataPacket);
+        readDataPacket(dataPacket);
 
         int beamCount = dataPacket.count() * 32;
         int beamIndexMin = std::ceil(angleMin_ * beamCount / (2 * M_PI));
@@ -113,19 +179,27 @@ void LidarDriver::run()
         int beamIndexExcludedMax = std::floor(angleExcludedMax_ * beamCount / (2 * M_PI));
 
         laserScan_.header.frame_id = frameId_;
-        laserScan_.angle_increment = 2 * M_PI / beamCount;
         laserScan_.angle_min = angleMin_;
         laserScan_.angle_max = angleMax_;
-        laserScan_.time_increment = 0.1 / beamCount;
-        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB)
-          laserScan_.scan_time = 0.1;
-        else
+        laserScan_.angle_increment = 2 * M_PI / beamCount;
+        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB) {
+          laserScan_.time_increment = 1.0 / 10 / beamCount;
+          laserScan_.scan_time = 1.0 / 10;
+        }
+        else {
+          laserScan_.time_increment = 1.0 / 15 / beamCount;
           laserScan_.scan_time = 1.0 / 15;
+        }
         laserScan_.range_min = rangeMin_;
         laserScan_.range_max = rangeMax_;
         laserScan_.ranges.resize(beamIndexMax - beamIndexMin + 1);
 
-        auto addRangeData = [&](const ltme01_sdk::DataPacket& dataPacket) {
+        uint32_t dataPacketTimestamps[ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX -
+            ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN + 1] = { 0 };
+
+        auto processDataPacket = [&](const ltme01_sdk::DataPacket& dataPacket) {
+          dataPacketTimestamps[dataPacket.index()] = dataPacket.timestamp();
+
           for (int i = 0; i < dataPacket.count(); i++) {
             int beamIndex = dataPacket.count() * (dataPacket.index() - 12) + i;
             if (beamIndex < beamIndexMin || beamIndex > beamIndexMax)
@@ -153,16 +227,35 @@ void LidarDriver::run()
           std::fill(laserScan_.ranges.begin(), laserScan_.ranges.end(), 0.0);
 
           do {
-            readRangeData(dataPacket);
+            readDataPacket(dataPacket);
           } while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN);
 
-          while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX) {
-            addRangeData(dataPacket);
-            readRangeData(dataPacket);
-          }
-          addRangeData(dataPacket);
+          laserScan_.header.stamp = ros::Time::now() - packetLatency;
 
-          laserScan_.header.stamp = ros::Time::now();
+          while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX) {
+            processDataPacket(dataPacket);
+            readDataPacket(dataPacket);
+          }
+          processDataPacket(dataPacket);
+
+          int estimatedScanTimeUs = 0;
+          for (int i = 1; i < sizeof(dataPacketTimestamps) / sizeof(uint32_t); i++) {
+            if (dataPacketTimestamps[i] >= dataPacketTimestamps[i - 1])
+              estimatedScanTimeUs += dataPacketTimestamps[i] - dataPacketTimestamps[i - 1];
+            else
+              estimatedScanTimeUs += dataPacketTimestamps[i] + (0xFFFFFFFF - dataPacketTimestamps[i - 1] + 1);
+          }
+          if (estimatedScanTimeUs != 0) {
+            double estimatedScanTime = ((double)estimatedScanTimeUs / 1e6) /
+                (ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX - ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN) *
+                (ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX - ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN + 1) *
+                4 / 3;
+            if (fabs(estimatedScanTime - laserScan_.scan_time) / laserScan_.scan_time < 0.1) {
+              laserScan_.time_increment = estimatedScanTime / beamCount;
+              laserScan_.scan_time = estimatedScanTime;
+            }
+          }
+
           laserScanPublisher_.publish(laserScan_);
         }
       }
