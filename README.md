@@ -7,6 +7,7 @@ Supported device models:
 Supported ROS distributions:
 * ROS Indigo / Ubuntu 14.04
 * ROS Kinetic / Ubuntu 16.04
+* ROS Melodic / Ubuntu 18.04
 
 # Build and Install
 

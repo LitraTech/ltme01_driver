@@ -3,6 +3,7 @@
 #include "ltme01_sdk/Device.h"
 
 #include <condition_variable>
+#include <functional>
 
 #if defined(_MSC_VER) && (_MSC_VER < 1900)
 typedef std::chrono::system_clock SteadyClock;
