@@ -18,6 +18,8 @@ public:
   static const uint8_t DATA_PACKET_INDEX_MAX = 23;
   static const uint8_t DATA_PACKET_COUNT_MAX = 64;
 
+  static const uint8_t FLAG_TIMESTAMP_VALID = 0x01;
+
   static const uint16_t RANGE_TIMEOUT = 0x544F;
   static const uint16_t RANGE_NO_DATA = 0x4E44;
 

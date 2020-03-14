@@ -7,7 +7,6 @@
 
 #include "ltme01_sdk/usb/UsbLocation.h"
 #include "ltme01_sdk/lan/LanLocation.h"
-#include "ltme01_sdk/Device.h"
 
 const std::string LidarDriver::DEFAULT_FRAME_ID = "ltme01";
 const double LidarDriver::ANGLE_MIN_LIMIT = -2.356;
@@ -19,6 +18,8 @@ const double LidarDriver::RANGE_MAX_LIMIT = 30;
 
 LidarDriver::LidarDriver()
   : nhPrivate_("~")
+  , spinner_(1)
+  , lowPowerEnabled_(false)
 {
   if (!nhPrivate_.getParam("device", device_)) {
     ROS_ERROR("Missing required parameter \"device\"");
@@ -58,6 +59,9 @@ LidarDriver::LidarDriver()
   }
 
   laserScanPublisher_ = nh_.advertise<sensor_msgs::LaserScan>("scan", 16);
+  setLowPowerService_ = nhPrivate_.advertiseService("set_low_power", &LidarDriver::setLowPowerService, this);
+
+  spinner_.start();
 }
 
 void LidarDriver::run()
@@ -91,87 +95,19 @@ void LidarDriver::run()
     else {
       ROS_INFO("Device opened");
 
-      auto readRangeData = [&device](ltme01_sdk::DataPacket& dataPacket) {
-        int count = 0;
-        do {
-          int result = device.readDataPacket(dataPacket, 6000);
-          if (result != ltme01_sdk::RESULT_SUCCESS)
-            throw std::exception();
-        } while (count++ < 5 && !dataPacket.isValid());
-        if (count == 5)
-          throw std::exception();
-      };
-
-      ltme01_sdk::DataPacket dataPacket;
       try {
-        readRangeData(dataPacket);
-
-        int beamCount = dataPacket.count() * 32;
-        int beamIndexMin = std::ceil(angleMin_ * beamCount / (2 * M_PI));
-        int beamIndexMax = std::floor(angleMax_ * beamCount / (2 * M_PI));
-        int beamIndexExcludedMin = std::ceil(angleExcludedMin_ * beamCount / (2 * M_PI));
-        int beamIndexExcludedMax = std::floor(angleExcludedMax_ * beamCount / (2 * M_PI));
-
-        laserScan_.header.frame_id = frameId_;
-        laserScan_.angle_min = angleMin_;
-        laserScan_.angle_max = angleMax_;
-        laserScan_.angle_increment = 2 * M_PI / beamCount;
-        if (deviceInfo->type() == ltme01_sdk::DEVICE_TYPE_USB) {
-          laserScan_.time_increment = 1.0 / 10 / beamCount;
-          laserScan_.scan_time = 1.0 / 10;
-        }
-        else {
-          laserScan_.time_increment = 1.0 / 15 / beamCount;
-          laserScan_.scan_time = 1.0 / 15;
-        }
-        laserScan_.range_min = rangeMin_;
-        laserScan_.range_max = rangeMax_;
-        laserScan_.ranges.resize(beamIndexMax - beamIndexMin + 1);
-
-        auto addRangeData = [&](const ltme01_sdk::DataPacket& dataPacket) {
-          for (int i = 0; i < dataPacket.count(); i++) {
-            int beamIndex = dataPacket.count() * (dataPacket.index() - 12) + i;
-            if (beamIndex < beamIndexMin || beamIndex > beamIndexMax)
-              continue;
-            if (beamIndex >= beamIndexExcludedMin && beamIndex <= beamIndexExcludedMax)
-              continue;
-
-            uint16_t range = dataPacket.range(i);
-            if (range == ltme01_sdk::DataPacket::RANGE_TIMEOUT)
-              laserScan_.ranges[beamIndex - beamIndexMin] = std::numeric_limits<float>::infinity();
-            else if (range == ltme01_sdk::DataPacket::RANGE_NO_DATA)
-              laserScan_.ranges[beamIndex - beamIndexMin] = 0;
-            else {
-              float value = range / 100.0;
-              if (value < laserScan_.range_min)
-                value = 0;
-              else if (value > laserScan_.range_max)
-                value = std::numeric_limits<float>::infinity();
-              laserScan_.ranges[beamIndex - beamIndexMin] = value;
-            }
-          }
-        };
-
         while (nh_.ok()) {
-          std::fill(laserScan_.ranges.begin(), laserScan_.ranges.end(), 0.0);
-
-          do {
-            readRangeData(dataPacket);
-          } while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN);
-
-          laserScan_.header.stamp = ros::Time::now();
-
-          while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX) {
-            addRangeData(dataPacket);
-            readRangeData(dataPacket);
-          }
-          addRangeData(dataPacket);
-
-          laserScanPublisher_.publish(laserScan_);
+          if (!lowPowerEnabled_.load())
+            runDataLoop(device);
+          else
+            runIdleLoop(device);
         }
       }
       catch (std::exception& e) {
-        ROS_WARN("Error reading data from device");
+        if (!lowPowerEnabled_.load())
+          ROS_WARN("Error reading data from device");
+        else
+          ROS_WARN("Lost connection to device");
       }
 
       device.close();
@@ -250,55 +186,25 @@ std::unique_ptr<ltme01_sdk::DeviceInfo> LidarDriver::waitForDevice(const std::st
       exit(-1);
     }
 
-    boost::asio::io_service ioService;
-    boost::asio::ip::udp::socket socket(ioService, boost::asio::ip::udp::v4());
-    boost::asio::deadline_timer timer(ioService);
+    std::unique_ptr<ltme01_sdk::Device> device(
+          new ltme01_sdk::Device(ltme01_sdk::LanLocation(address, port)));
 
-    boost::asio::ip::udp::endpoint localEndpoint(boost::asio::ip::udp::v4(), ntohs(port));
-    boost::system::error_code error;
-    socket.bind(localEndpoint, error);
-    if (error) {
-      ROS_ERROR("Can't bind to port %d. Please make sure you have sufficient permissions, "
-                "and only one driver node instance is running.", ntohs(port));
+    int result = device->open();
+    if (result != ltme01_sdk::RESULT_SUCCESS) {
+      if (result == ltme01_sdk::RESULT_ACCESS_DENIED)
+        ROS_ERROR("Can't bind to port %d. Please make sure you have sufficient permissions, "
+                        "and only one driver node instance is running.", ntohs(port));
+      else
+        ROS_ERROR("Unable to initiate device discovery (unknown error)");
       exit(-1);
     }
 
-    ltme01_sdk::DataPacket dataPacket;
     while (nh_.ok()) {
-      boost::system::error_code timerResult, transactionResult;
-      timerResult = transactionResult = boost::asio::error::would_block;
-
-      timer.expires_from_now(boost::posix_time::milliseconds(500));
-      timer.async_wait([&](const boost::system::error_code& error) {
-        timerResult = error;
-      });
-
-      auto buffer = boost::asio::buffer(dataPacket.data(), ltme01_sdk::DataPacket::MAX_DATA_PACKET_SIZE);
-      boost::asio::ip::udp::endpoint peerEndpoint;
-      std::function<void(const boost::system::error_code&, std::size_t)> handler;
-      handler = [&](const boost::system::error_code& error, std::size_t) {
-        if (!error) {
-          if (peerEndpoint.address().to_v4().to_ulong() != ntohl(address))
-            socket.async_receive_from(buffer, peerEndpoint, handler);
-          else
-            deviceInfo = std::unique_ptr<ltme01_sdk::DeviceInfo>(
-                  new ltme01_sdk::DeviceInfo(ltme01_sdk::LanLocation(address, port)));
-        }
-        else
-          transactionResult = error;
-      };
-      socket.async_receive_from(buffer, peerEndpoint, handler);
-
-      ioService.reset();
-      while (ioService.run_one()) {
-        if (transactionResult != boost::asio::error::would_block)
-          timer.cancel();
-        if (timerResult != boost::asio::error::would_block)
-          socket.cancel();
-      }
-
-      if (deviceInfo)
+      if (device->checkConnectivity()) {
+        deviceInfo = std::unique_ptr<ltme01_sdk::DeviceInfo>(
+              new ltme01_sdk::DeviceInfo(ltme01_sdk::LanLocation(address, port)));
         break;
+      }
       else {
         ROS_INFO_THROTTLE(5, "Waiting for device... [%s]", (boost::asio::ip::address_v4(ntohl(address)).to_string() +
                                                             ":" + std::to_string(ntohs(port))).c_str());
@@ -308,6 +214,119 @@ std::unique_ptr<ltme01_sdk::DeviceInfo> LidarDriver::waitForDevice(const std::st
   }
 
   return deviceInfo;
+}
+
+void LidarDriver::runDataLoop(ltme01_sdk::Device& device)
+{
+  auto readRangeData = [&device](ltme01_sdk::DataPacket& dataPacket) {
+    int count = 0;
+    do {
+      int result = device.readDataPacket(dataPacket, 6000);
+      if (result != ltme01_sdk::RESULT_SUCCESS)
+        throw std::exception();
+    } while (count++ < 5 && !dataPacket.isValid());
+    if (count >= 5)
+      throw std::exception();
+  };
+
+  ltme01_sdk::DataPacket dataPacket;
+
+  try {
+    readRangeData(dataPacket);
+  }
+  catch (...) {
+    device.exitLowPowerMode();
+    readRangeData(dataPacket);
+  }
+  int beamCount = dataPacket.count() * 32;
+  int beamIndexMin = std::ceil(angleMin_ * beamCount / (2 * M_PI));
+  int beamIndexMax = std::floor(angleMax_ * beamCount / (2 * M_PI));
+  int beamIndexExcludedMin = std::ceil(angleExcludedMin_ * beamCount / (2 * M_PI));
+  int beamIndexExcludedMax = std::floor(angleExcludedMax_ * beamCount / (2 * M_PI));
+
+  laserScan_.header.frame_id = frameId_;
+  laserScan_.angle_min = angleMin_;
+  laserScan_.angle_max = angleMax_;
+  laserScan_.angle_increment = 2 * M_PI / beamCount;
+  if (typeid(device.location()) == typeid(ltme01_sdk::UsbLocation)) {
+    laserScan_.time_increment = 1.0 / 10 / beamCount;
+    laserScan_.scan_time = 1.0 / 10;
+  }
+  else {
+    laserScan_.time_increment = 1.0 / 15 / beamCount;
+    laserScan_.scan_time = 1.0 / 15;
+  }
+  laserScan_.range_min = rangeMin_;
+  laserScan_.range_max = rangeMax_;
+  laserScan_.ranges.resize(beamIndexMax - beamIndexMin + 1);
+
+  auto addRangeData = [&](const ltme01_sdk::DataPacket& dataPacket) {
+    for (int i = 0; i < dataPacket.count(); i++) {
+      int beamIndex = dataPacket.count() * (dataPacket.index() - 12) + i;
+      if (beamIndex < beamIndexMin || beamIndex > beamIndexMax)
+        continue;
+      if (beamIndex >= beamIndexExcludedMin && beamIndex <= beamIndexExcludedMax)
+        continue;
+
+      uint16_t range = dataPacket.range(i);
+      if (range == ltme01_sdk::DataPacket::RANGE_TIMEOUT)
+        laserScan_.ranges[beamIndex - beamIndexMin] = std::numeric_limits<float>::infinity();
+      else if (range == ltme01_sdk::DataPacket::RANGE_NO_DATA)
+        laserScan_.ranges[beamIndex - beamIndexMin] = 0;
+      else {
+        float value = range / 100.0;
+        if (value < laserScan_.range_min)
+          value = 0;
+        else if (value > laserScan_.range_max)
+          value = std::numeric_limits<float>::infinity();
+        laserScan_.ranges[beamIndex - beamIndexMin] = value;
+      }
+    }
+  };
+
+  while (nh_.ok() && !lowPowerEnabled_.load()) {
+    std::fill(laserScan_.ranges.begin(), laserScan_.ranges.end(), 0.0);
+
+    do {
+      readRangeData(dataPacket);
+    } while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MIN);
+
+    laserScan_.header.stamp = ros::Time::now();
+
+    while (dataPacket.index() != ltme01_sdk::DataPacket::DATA_PACKET_INDEX_MAX) {
+      addRangeData(dataPacket);
+      readRangeData(dataPacket);
+    }
+    addRangeData(dataPacket);
+
+    laserScanPublisher_.publish(laserScan_);
+  }
+}
+
+void LidarDriver::runIdleLoop(ltme01_sdk::Device& device)
+{
+  device.enterLowPowerMode();
+  ROS_INFO("Device now in low-power mode");
+
+  auto checkDevicePresence = [&device]() {
+    int count = 0;
+    while (!device.checkConnectivity() && ++count < 5);
+    if (count >= 5)
+      throw std::exception();
+  };
+  while (nh_.ok() && lowPowerEnabled_.load())
+    checkDevicePresence();
+
+  device.exitLowPowerMode();
+  ROS_INFO("Device brought out of low-power mode");
+}
+
+bool LidarDriver::setLowPowerService(std_srvs::SetBool::Request& request,
+                                     std_srvs::SetBool::Response& response)
+{
+  lowPowerEnabled_ = request.data;
+  response.success = true;
+  return true;
 }
 
 int main(int argc, char* argv[])
